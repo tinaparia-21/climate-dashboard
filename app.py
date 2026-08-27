@@ -9,7 +9,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 # --- GOOGLE SHEETS CONNECTION (for persisting quiz feedback) ---
-GOOGLE_SHEET_NAME = "Climate Dashboard Responses"  # <-- change to your actual Sheet name
+GOOGLE_SHEET_ID = "1R4Q_0LfhaVPJWp0XILxk-dlpSCOPWkTv2jYdFlTKfC4"
 SHEET_HEADER = ["ID", "Name", "Quiz Score", "Date", "Feedback"]
 
 @st.cache_resource
@@ -31,7 +31,7 @@ def get_feedback_worksheet():
             dict(st.secrets["gcp_service_account"]), scopes=scopes
         )
         client = gspread.authorize(creds)
-        spreadsheet = client.open(GOOGLE_SHEET_NAME)
+        spreadsheet = client.open_by_key(GOOGLE_SHEET_ID)
         worksheet = spreadsheet.sheet1
         if worksheet.row_values(1) != SHEET_HEADER:
             worksheet.clear()
@@ -40,6 +40,62 @@ def get_feedback_worksheet():
     except Exception as e:
         st.warning(f"Could not connect to Google Sheets, falling back to local CSV. ({e})")
         return None
+
+@st.cache_resource
+def get_visit_counter_worksheet():
+    """
+    Connects to a separate tab ('VisitCounter') in the same Google Sheet,
+    used to store a single running total of app visits in cell A1.
+    Creates the tab automatically if it doesn't exist yet.
+    Returns None if secrets aren't configured.
+    """
+    if "gcp_service_account" not in st.secrets:
+        return None
+    try:
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ]
+        creds = Credentials.from_service_account_info(
+            dict(st.secrets["gcp_service_account"]), scopes=scopes
+        )
+        client = gspread.authorize(creds)
+        spreadsheet = client.open_by_key(GOOGLE_SHEET_ID)
+        try:
+            counter_ws = spreadsheet.worksheet("VisitCounter")
+        except gspread.exceptions.WorksheetNotFound:
+            counter_ws = spreadsheet.add_worksheet(title="VisitCounter", rows=2, cols=1)
+            counter_ws.update("A1", [[0]])
+        return counter_ws
+    except Exception:
+        return None
+
+def increment_and_get_visit_count():
+    """
+    Increments the visit counter exactly once per browser session
+    (not on every button click / rerun), then returns the current total.
+    Falls back to a session-only count if Sheets isn't connected.
+    """
+    counter_ws = get_visit_counter_worksheet()
+
+    if counter_ws is None:
+        # Fallback: session-only counter (resets when the app restarts)
+        if "local_visit_count" not in st.session_state:
+            st.session_state.local_visit_count = 1
+        return st.session_state.local_visit_count, False
+
+    if "counted_this_session" not in st.session_state:
+        try:
+            current = counter_ws.acell("A1").value
+            current = int(current) if current else 0
+            new_total = current + 1
+            counter_ws.update("A1", [[new_total]])
+            st.session_state.counted_this_session = True
+            st.session_state.visit_count_cache = new_total
+        except Exception:
+            st.session_state.visit_count_cache = None
+
+    return st.session_state.get("visit_count_cache"), True
 
 # --- GLOBAL RED GLOW PALETTES ---
 RED_GLOW_BARS = ["#4A0404", "#991B1B", "#DC2626", "#EF4444", "#FCA5A5"]
@@ -348,8 +404,12 @@ raw_df, country_df = load_dataset()
 st.sidebar.title("🔍 Report Filters")
 st.sidebar.markdown("Configure global parameters applied across dashboard pages.")
 
-# --- VISITOR COUNTER BADGE SQUARE ---
-st.sidebar.markdown("""
+# --- VISITOR COUNTER (real, backed by Google Sheets) ---
+visit_count, is_persistent = increment_and_get_visit_count()
+count_display = f"{visit_count:,}" if visit_count is not None else "—"
+subtitle = "Total visits (persistent)" if is_persistent else "Visits this session only (set up Google Sheets for a persistent count)"
+
+st.sidebar.markdown(f"""
     <div style="
         background: var(--background-secondary, rgba(0, 230, 118, 0.05));
         border: 2px solid #00E676;
@@ -364,9 +424,12 @@ st.sidebar.markdown("""
         <h5 style="margin: 0 0 8px 0; font-size: 0.9rem; color: #00E676; display: flex; align-items: center; justify-content: center; gap: 6px;">
             🌍 <span>Portal Views</span>
         </h5>
-        <img src="https://hits.seeyoufarm.com/api/count/incr/badge.svg?url=https%3A%2F%2Fclimate-change-awareness-portal.streamlit.app&count_bg=%2300E676&title_bg=%231E293B&icon=&icon_color=%23E7E7E7&title=Views&edge_flat=false" 
-             style="max-width: 100%; height: auto; margin-top: 2px;" 
-             alt="Visitor Count"/>
+        <div style="font-size: 1.8rem; font-weight: 800; color: var(--text-color, inherit); line-height: 1;">
+            {count_display}
+        </div>
+        <div style="font-size: 0.7rem; opacity: 0.7; margin-top: 6px; color: var(--text-color, inherit);">
+            {subtitle}
+        </div>
     </div>
 """, unsafe_allow_html=True)
 st.sidebar.markdown("---")
@@ -2953,7 +3016,7 @@ elif "Knowledge Quiz" in selected_tab:
                         worksheet.append_row(
                             [next_id, session_user_name, score_display, submission_date, user_feedback]
                         )
-                    st.success(f"🎉 Thank you, {session_user_name}! Your feedback has been saved to Google Sheets.")
+                    st.success(f"🎉 Thank you, {session_user_name}! Your feedback has been saved.")
                 except Exception as e:
                     st.error(f"Couldn't save to Google Sheets ({e}). Please try again.")
             else:
