@@ -1,0 +1,16 @@
+# Secrets - never commit these
+.streamlit/secrets.toml
+*.json
+!.streamlit/config.toml
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Local data
+quiz_responses.csv
+
+# OS
+.DS_Store
